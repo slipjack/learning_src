@@ -1,0 +1,214 @@
+#include "../include/offboard_control/offboard_control_node.h"
+using namespace std;
+void *off_borad_process_thread(void *args)
+{
+  ros::Rate rate(20.0);
+  mavros_msgs::SetMode offb_set_mode1;
+  offb_set_mode1.request.custom_mode = "OFFBOARD";
+  mavros_msgs::CommandBool arm_cmd1;
+  arm_cmd1.request.value = true;
+  ros::Time last_request = ros::Time::now();
+  while(ros::ok())
+  {
+    if(!(stop_offboard)&&is_start_uav)
+    {
+      if( !current_state.armed)
+      {
+        if( arming_client.call(arm_cmd1) &&
+            arm_cmd1.response.success)
+        {
+          ROS_INFO("Vehicle armed");
+        }
+        last_request = ros::Time::now();
+
+      }
+      else
+      {
+        if( current_state.mode != "OFFBOARD")
+        {
+          if( set_mode_client.call(offb_set_mode1) &&
+              offb_set_mode1.response.mode_sent)
+          {
+            ROS_INFO("Offboard enabled");
+          }
+          last_request = ros::Time::now();
+        }
+      }
+
+      ref_local_position_pub.publish(ref_local_position_msg);
+      //ref_local_velocity_pub.publish(ref_local_velocity_msg);
+      rate.sleep();
+    }
+    else
+    {
+      //local_pos_pub.publish(pose);
+      // rate.sleep();
+      //ROS_INFO("stop_offboard");
+    }
+  }
+  pthread_join(off_borad_thread,NULL);
+
+}
+void rc_in_sub_call(const mavros_msgs::RCIn::ConstPtr& msg)
+{
+  // ROS_INFO("running");
+  if(msg.get()->channels[5] >1000 && msg.get()->channels[5] <1400)
+  {
+    stop_offboard = true;
+  }
+  else
+  {
+    stop_offboard = false;
+  }
+  if(msg.get()->channels[9] >1000 && msg.get()->channels[9] <1400)
+  {
+    is_start_uav = true;
+  }
+  else
+  {
+   is_start_uav = false;
+  }
+  if(first_run == 0)
+  {
+
+    if(msg.get()->channels[8] >1000 && msg.get()->channels[8] <1400)
+    {
+      rc_flag = 3;
+      first_run = 1;
+      ROS_INFO("rc_flag = 3 and first_run = 1");
+      //take off
+    }
+    else
+    {
+      first_run = 0;
+    }
+    ref_local_position_msg.pose.position.x = 0;
+    ref_local_position_msg.pose.position.y = 0;
+    ref_local_position_msg.pose.position.z = 2;
+
+  }
+  else
+  {
+    if(rc_flag == 3 && msg.get()->channels[8] >1400&& msg.get()->channels[8] <1800)
+    {
+
+      ROS_INFO("take off x = 1");
+      ref_local_position_msg.pose.position.x = 1;
+      ref_local_position_msg.pose.position.y = 0;
+      ref_local_position_msg.pose.position.z = 2;
+      rc_flag = 2;
+    }
+    else if(rc_flag == 2 && msg.get()->channels[8] >1800&& msg.get()->channels[8] <2000)
+    {
+      ref_local_position_msg.pose.position.x = 0;
+      ref_local_position_msg.pose.position.y = 0;
+      ref_local_position_msg.pose.position.z = 2;
+      rc_flag = 1;
+      ROS_INFO("x=0,y=0,z=2");
+
+    }
+    else if(rc_flag == 1 && msg.get()->channels[8] >1400&& msg.get()->channels[8] <1800)
+    {
+      ref_local_position_msg.pose.position.x = 0;
+      ref_local_position_msg.pose.position.y = 1;
+      ref_local_position_msg.pose.position.z = 2;
+      rc_flag = 2;
+      ROS_INFO("x=0,y=1,z=2");
+    }
+    else if(rc_flag == 2 && msg.get()->channels[8] >1000 && msg.get()->channels[8] <1400)
+    {
+
+      ref_local_position_msg.pose.position.x = 0;
+      ref_local_position_msg.pose.position.y = 0;
+      ref_local_position_msg.pose.position.z = 0;
+      rc_flag = 3;
+      ROS_INFO("x=0,y=0,z=0");
+    }
+    else
+    {
+      //ROS_INFO("rc_flag = 3");
+    }
+  }
+}
+
+void state_cb(const mavros_msgs::State::ConstPtr& msg){
+  current_state = *msg;
+}
+
+void ref_local_position_cb(const geometry_msgs::PoseStampedConstPtr& msg)
+{
+
+  ref_local_position_msg.pose.position.x = msg.get()->pose.position.x;
+  ref_local_position_msg.pose.position.y = msg.get()->pose.position.y;
+  ref_local_position_msg.pose.position.z = msg.get()->pose.position.z;
+
+}
+
+void ref_local_velocity_cb(const geometry_msgs::TwistConstPtr& msg)
+{
+
+  ref_local_velocity_msg.linear.x = msg.get()->linear.x;
+  ref_local_velocity_msg.linear.y = msg.get()->linear.y;
+  ref_local_velocity_msg.linear.z = msg.get()->linear.z;
+}
+
+void uav_start_cb(const std_msgs::Bool::ConstPtr& msg)
+{
+  is_start_uav = msg.get()->data;
+}
+
+int main(int argc, char *argv[])
+{
+  ros::init(argc,argv,"offboard_control");
+  rc_flag = 3;
+  first_run = 0;
+  stop_offboard = true;
+
+  ros::NodeHandle nh;
+  ros::NodeHandle n("~");
+  string ref_local_position_topic;
+  string ref_local_velocity_topic;
+  string uav_start_topic;
+  n.getParam("ref_local_velocity_topic",ref_local_velocity_topic);
+  n.getParam("ref_local_position_topic",ref_local_position_topic);
+  n.getParam("uav_start_topic",uav_start_topic);
+
+  rc_in_sub = nh.subscribe("mavros/rc/in",10,rc_in_sub_call);
+  state_sub = nh.subscribe("mavros/state", 10, state_cb);
+  ros::Subscriber ref_local_position_sub = nh.subscribe(ref_local_position_topic,10,ref_local_position_cb);
+  ros::Subscriber ref_local_velocity_sub = nh.subscribe(ref_local_velocity_topic,10,ref_local_velocity_cb);
+  ros::Subscriber uav_start_sub = nh.subscribe(uav_start_topic,10,uav_start_cb);
+
+  arming_client = nh.serviceClient<mavros_msgs::CommandBool>("mavros/cmd/arming");
+  set_mode_client = nh.serviceClient<mavros_msgs::SetMode>("mavros/set_mode");
+
+  ref_local_position_pub = nh.advertise<geometry_msgs::PoseStamped>("/mavros/setpoint_position/local", 10);
+  ref_local_velocity_pub = nh.advertise<geometry_msgs::Twist>("/mavros/setpoint_velocity/cmd_vel_unstamped",10);
+
+
+  ref_local_position_msg.pose.position.x = 0;
+  ref_local_position_msg.pose.position.y = 0;
+  ref_local_position_msg.pose.position.z = 0;
+  ref_local_velocity_msg.linear.x = 0.5;
+  ref_local_velocity_msg.linear.y = 0.5;
+  ref_local_velocity_msg.linear.z = 0.5;
+  ros::Rate rate(20.0);
+  // wait for FCU connection
+  while(ros::ok() && !current_state.connected){
+    ros::spinOnce();
+    rate.sleep();
+  }
+
+  for(int i = 10; ros::ok() && i > 0; --i){
+    ref_local_position_pub.publish(ref_local_position_msg);
+    ros::spinOnce();
+    rate.sleep();
+  }
+
+  int flag_thread = pthread_create(&off_borad_thread, NULL, off_borad_process_thread, NULL);
+  if (flag_thread < 0) {
+    ROS_ERROR("pthread_create ros_process_thread failed: %d\n", flag_thread);
+  }
+
+  ros::spin();
+}
